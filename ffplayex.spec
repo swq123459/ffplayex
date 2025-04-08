@@ -5,7 +5,8 @@ a = Analysis(
     ['ffplayex.py'],
     pathex=[],
     binaries=[
-        ('D:/code/thirdlib/EaxLibrary/EaxComponent/codecUnit/bin/GbMediaTool.exe', '.'),],
+        ('D:/code/thirdlib/EaxLibrary/EaxComponent/codecUnit/bin/GbMediaTool.exe', '.'),
+        ('D:/code/thirdlib/EaxLibrary/EaxComponent/videoencrypt/bin/decryptor.exe', '.')],
     datas=[],
     hiddenimports=[],
     hookspath=[],

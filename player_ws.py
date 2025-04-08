@@ -41,6 +41,8 @@ async def save_binary_data(uri, output_filename, stop_event):
 
 
 def play(url, etc):
+    etc = " ".join(etc)
+
     encry_file = make_temp_name()
 
     print(f"encry > {encry_file}")

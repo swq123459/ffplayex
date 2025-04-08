@@ -18,6 +18,7 @@ def make_temp_name():
 
 
 def play(url, etc):
+    etc = " ".join(etc)
     exe_path = get_exe_path("GbMediaTool.exe")
     print("exe path is ", exe_path)
     try:

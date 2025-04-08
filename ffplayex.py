@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from player_ws import play as ws_player
 from player_other import play as other_player
 from player_gb28181 import play as gb28181_player
+from player_gb35114 import play as gb35114_player
 
 
 def main():
@@ -19,7 +20,7 @@ def main():
 
     args = parser.parse_args()
     url = args.url
-    etc = " ".join(args.etc)
+    etc = args.etc
     print("url is ", url)
     print("etc is ", etc)
     #
@@ -30,6 +31,8 @@ def main():
         ws_player(url, etc)
     elif scheme.startswith("gb28181"):
         gb28181_player(url, etc)
+    elif "--vkek" in etc:
+        gb35114_player(url, etc)
     else:
         other_player(url, etc)
 
