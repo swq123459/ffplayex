@@ -28,7 +28,7 @@ def next_value(my_list, value):
         return None
 
 
-def paly(url, etc):
+def play(url, etc):
 
     print("url is ", url)
 
@@ -100,7 +100,7 @@ def main():
     url = args.url
     etc = args.etc
 
-    paly(url, etc)
+    play(url, etc)
 
 
 if __name__ == "__main__":
