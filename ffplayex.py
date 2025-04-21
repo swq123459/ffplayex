@@ -2,11 +2,12 @@
 # -*- coding: UTF-8 -*-
 import argparse
 from urllib.parse import urlparse
-
+from pathlib import Path
 from player_ws import play as ws_player
 from player_other import play as other_player
 from player_gb28181 import play as gb28181_player
 from player_gb35114 import play as gb35114_player
+from player_pcap import play as pcap_player
 
 
 def main():
@@ -24,8 +25,12 @@ def main():
     print("url is ", url)
     print("etc is ", etc)
     #
-    parsed_url = urlparse(url)
-    scheme = parsed_url.scheme
+    if Path(url).exists():
+
+        scheme = Path(url).suffix.lstrip('.')
+    else:
+        parsed_url = urlparse(url)
+        scheme = parsed_url.scheme
 
     if scheme == "ws" or scheme == "wss":
         ws_player(url, etc)
@@ -33,6 +38,8 @@ def main():
         gb28181_player(url, etc)
     elif "--vkek" in etc:
         gb35114_player(url, etc)
+    elif scheme == "pcap":
+        pcap_player(url, etc)
     else:
         other_player(url, etc)
 
