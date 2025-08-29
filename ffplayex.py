@@ -8,7 +8,7 @@ from player_other import play as other_player
 from player_gb28181 import play as gb28181_player
 from player_gb35114 import play as gb35114_player
 from player_pcap import play as pcap_player
-
+from player_rtp import play as rtp_player
 
 def main():
     parser = argparse.ArgumentParser(
@@ -40,6 +40,8 @@ def main():
         gb35114_player(url, etc)
     elif scheme == "pcap":
         pcap_player(url, etc)
+    elif scheme == "rtp":
+        rtp_player(url, etc)
     else:
         other_player(url, etc)
 
