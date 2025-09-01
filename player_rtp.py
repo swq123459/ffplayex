@@ -12,14 +12,72 @@ import tempfile
 import uuid
 import threading
 from pathlib import Path
-
-VIDEO_PT = 98
+import http.client
+from urllib.parse import urlparse
+import io
+VIDEO_PT = [98, 100]
 COM_PT = [96]
 AUDIO_PT = [8, 101]  # we'll ignore audio
 CLOCK_RATE = 90000
 AUDIO_CLOCK = 48000
 
 VIDEO_UDP = ("127.0.0.1", 1238)
+
+
+
+def stream_http_to_files(url, header_file='stream.rtp.sdp', stream_file='stream.rtp', buffer_size=1024):
+
+    parsed_url = urlparse(url)
+    if parsed_url.scheme != 'http':
+        raise ValueError("Only 'http' scheme is supported")
+
+    host = parsed_url.hostname
+    port = parsed_url.port or 80
+    path = parsed_url.path
+    if parsed_url.query:
+        path += '?' + parsed_url.query
+
+    # Connect to the server
+    conn = http.client.HTTPConnection(host, port)
+    conn.request("GET", path)
+    response = conn.getresponse()
+
+    if response.status != 200:
+        raise ConnectionError(f"HTTP request failed with status {response.status}")
+
+    header_done = False
+    leftover = b''  # leftover bytes from previous read
+    with open(header_file, 'wb') as hf, open(stream_file, 'ab') as sf:
+        while True:
+            chunk = response.read(buffer_size)
+            if not chunk:
+                break  # Stream ended
+            data = leftover + chunk
+            if not header_done:
+                # Try to find header separator
+                sep_index = data.find(b'\r\n\r\n')
+                if sep_index != -1:
+                    # Write header part including separator
+                    hf.write(data[:sep_index])
+                    hf.flush()
+                    # Remaining goes to stream
+                    sf.write(data[sep_index + len(b'\r\n\r\n'):])
+                    sf.flush()
+                    header_done = True
+                else:
+                    # Header not finished, write all to header
+                    hf.write(data)
+                    hf.flush()
+                    leftover = b''
+            else:
+                # After header is done, write directly to stream
+                sf.write(data)
+                sf.flush()
+                leftover = b''
+
+    conn.close()
+    print("Stream processing finished.")
+
 
 
 def make_temp_name(suffix):
@@ -73,7 +131,7 @@ def start_listen_stream(input, etc, is_mp2p, stop_event):
     if is_mp2p:
         command = f"ffplay -hide_banner -follow 1 -window_title {etc} -i {input}"
     else:
-        command = f'ffplay -hide_banner {etc} -protocol_whitelist file,udp,rtp {input}'
+        command = f'ffplay -hide_banner {etc}  -protocol_whitelist file,udp,rtp {input}'
     print("ffmpeg command", command)
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, shell=True)
@@ -128,7 +186,7 @@ def push_stream(input, an, socket_url, is_mp2p, stop_event):
             timestamp = struct.unpack(">I", packet[4:8])[0]
 
 
-            if pt == VIDEO_PT:
+            if pt in VIDEO_PT:
                 # First packet: initialize
                 sleep_time = 0
                 if prev_video_ts is None:
@@ -178,10 +236,7 @@ def push_stream(input, an, socket_url, is_mp2p, stop_event):
 
 
 
-
-
-
-def play(url, etc_list):
+def play_rtp_file(url, etc_list):
     input = url
     etc = " ".join(etc_list)
     an = "-an" in etc
@@ -230,6 +285,23 @@ def play(url, etc_list):
         stop_event.set()
         print("Rtp pusher stop success")
 
+
+
+def play(url, etc_list):
+    if url.startswith("http"):
+        rtp_part_file = make_temp_name("rtp")
+        sdp_part_file = f"{rtp_part_file}.sdp"
+        def pull_http_stream():
+            stream_http_to_files(url=url, stream_file=rtp_part_file, header_file=sdp_part_file)
+        t = threading.Thread(target=pull_http_stream, daemon=True)
+        t.start()
+        while not os.path.exists(rtp_part_file):
+            time.sleep(0.1)
+        print("rtp_part_file", rtp_part_file)
+        play_rtp_file(url=rtp_part_file, etc_list=etc_list)
+
+    else:
+        play_rtp_file(url=url, etc_list=etc_list)
 
 
 if __name__ == "__main__":
