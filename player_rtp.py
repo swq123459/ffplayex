@@ -15,6 +15,10 @@ from pathlib import Path
 import http.client
 from urllib.parse import urlparse
 import io
+import websockets
+import ssl
+import asyncio
+
 VIDEO_PT = [98, 100]
 COM_PT = [96]
 AUDIO_PT = [8, 101]  # we'll ignore audio
@@ -22,63 +26,98 @@ CLOCK_RATE = 90000
 AUDIO_CLOCK = 48000
 
 VIDEO_UDP = ("127.0.0.1", 1238)
+class RtpWrite:
+    def __init__(self):
+        self.leftover = b''
+        self.header_done = False
 
+    def write(self, chunk, hf, sf):
 
+        data = self.leftover + chunk
+        if not self.header_done:
+            # Try to find header separator
+            sep_index = data.find(b'\r\n\r\n')
+            if sep_index != -1:
+                # Write header part including separator
+                hf.write(data[:sep_index])
+                hf.flush()
+                # Remaining goes to stream
+                sf.write(data[sep_index + len(b'\r\n\r\n'):])
+                sf.flush()
+                self.header_done = True
+            else:
+                # Header not finished, write all to header
+                hf.write(data)
+                hf.flush()
+                self.leftover = b''
+        else:
+            # After header is done, write directly to stream
+            sf.write(data)
+            sf.flush()
+            self.leftover = b''
 
-def stream_http_to_files(url, header_file='stream.rtp.sdp', stream_file='stream.rtp', buffer_size=1024):
-
+def stream_http_to_files(url, header_file, stream_file, buffer_size):
     parsed_url = urlparse(url)
-    if parsed_url.scheme != 'http':
-        raise ValueError("Only 'http' scheme is supported")
 
     host = parsed_url.hostname
     port = parsed_url.port or 80
     path = parsed_url.path
+    scheme = parsed_url.scheme
     if parsed_url.query:
         path += '?' + parsed_url.query
 
     # Connect to the server
-    conn = http.client.HTTPConnection(host, port)
+    if scheme == 'https':
+        conn = http.client.HTTPSConnection(host, port)
+    else:
+        conn = http.client.HTTPConnection(host, port)
     conn.request("GET", path)
     response = conn.getresponse()
 
     if response.status != 200:
         raise ConnectionError(f"HTTP request failed with status {response.status}")
 
-    header_done = False
-    leftover = b''  # leftover bytes from previous read
+    writer = RtpWrite()
     with open(header_file, 'wb') as hf, open(stream_file, 'ab') as sf:
         while True:
             chunk = response.read(buffer_size)
             if not chunk:
                 break  # Stream ended
-            data = leftover + chunk
-            if not header_done:
-                # Try to find header separator
-                sep_index = data.find(b'\r\n\r\n')
-                if sep_index != -1:
-                    # Write header part including separator
-                    hf.write(data[:sep_index])
-                    hf.flush()
-                    # Remaining goes to stream
-                    sf.write(data[sep_index + len(b'\r\n\r\n'):])
-                    sf.flush()
-                    header_done = True
-                else:
-                    # Header not finished, write all to header
-                    hf.write(data)
-                    hf.flush()
-                    leftover = b''
-            else:
-                # After header is done, write directly to stream
-                sf.write(data)
-                sf.flush()
-                leftover = b''
+            writer.write(chunk=chunk, hf=hf, sf=sf)
+
 
     conn.close()
     print("Stream processing finished.")
 
 
+async def stream_ws_to_files(url, header_file, stream_file, buffer_size):
+    try:
+        if url.startswith("wss://"):
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+        else:
+            ssl_context = None
+
+        async with websockets.connect(url, ssl=ssl_context) as websocket:
+            writer = RtpWrite()
+            with open(header_file, 'wb') as hf, open(stream_file, 'ab') as sf:
+
+                while True:
+                    data = await websocket.recv()
+                    if isinstance(data, bytes):  # Ensure binary data
+                        writer.write(chunk=data, hf=hf, sf=sf)
+                    else:
+                        print("Received non-binary data, skipping.")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+def stream_to_files(url, header_file, stream_file, buffer_size=1024):
+    if url.startswith("http"):
+        stream_http_to_files(url, header_file, stream_file, buffer_size)
+    elif url.startswith("ws"):
+        asyncio.run(stream_ws_to_files(url, header_file, stream_file, buffer_size))
 
 def make_temp_name(suffix):
     return os.path.join(tempfile.gettempdir(), str(uuid.uuid1()) + f".{suffix}")
@@ -127,11 +166,11 @@ def modify_sdp(input_file, first_port, ip, an):
 
 
 
-def start_listen_stream(input, etc, is_mp2p, stop_event):
+def start_listen_stream(input, etc, is_mp2p, window_title, stop_event):
     if is_mp2p:
-        command = f"ffplay -hide_banner -follow 1 -window_title {etc} -i {input}"
+        command = f"ffplay -hide_banner -follow 1 -window_title {window_title} -i {input}"
     else:
-        command = f'ffplay -hide_banner {etc}  -protocol_whitelist file,udp,rtp {input}'
+        command = f'ffplay -hide_banner {etc} -window_title {window_title} -protocol_whitelist file,udp,rtp {input}'
     print("ffmpeg command", command)
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, shell=True)
@@ -236,7 +275,7 @@ def push_stream(input, an, socket_url, is_mp2p, stop_event):
 
 
 
-def play_rtp_file(url, etc_list):
+def play_rtp_file(url, etc_list, window_title):
     input = url
     etc = " ".join(etc_list)
     an = "-an" in etc
@@ -267,7 +306,7 @@ def play_rtp_file(url, etc_list):
 
     def listen_stream():
 
-        start_listen_stream(input=dynamic_sdp_file, etc=etc, is_mp2p=is_mp2p, stop_event=stop_event)
+        start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=window_title, is_mp2p=is_mp2p, stop_event=stop_event)
 
     pull_thread = threading.Thread(target=listen_stream, daemon=True)
     pull_thread.start()
@@ -277,7 +316,7 @@ def play_rtp_file(url, etc_list):
         socket_url = [mp2p_file]
     else:
         # wait ffmpeg ready
-        time.sleep(2)
+        time.sleep(1.5)
         socket_url = VIDEO_UDP
 
     try:
@@ -290,20 +329,20 @@ def play_rtp_file(url, etc_list):
 
 
 def play(url, etc_list):
-    if url.startswith("http"):
+    if not os.path.exists(url):
         rtp_part_file = make_temp_name("rtp")
         sdp_part_file = f"{rtp_part_file}.sdp"
         def pull_http_stream():
-            stream_http_to_files(url=url, stream_file=rtp_part_file, header_file=sdp_part_file)
+            stream_to_files(url=url, stream_file=rtp_part_file, header_file=sdp_part_file)
         t = threading.Thread(target=pull_http_stream, daemon=True)
         t.start()
         while not os.path.exists(rtp_part_file):
             time.sleep(0.1)
         print("rtp_part_file", rtp_part_file)
-        play_rtp_file(url=rtp_part_file, etc_list=etc_list)
+        play_rtp_file(url=rtp_part_file, etc_list=etc_list, window_title=url)
 
     else:
-        play_rtp_file(url=url, etc_list=etc_list)
+        play_rtp_file(url=url, etc_list=etc_list, window_title=url)
 
 
 if __name__ == "__main__":

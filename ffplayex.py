@@ -9,7 +9,7 @@ from player_gb28181 import play as gb28181_player
 from player_gb35114 import play as gb35114_player
 from player_pcap import play as pcap_player
 from player_rtp import play as rtp_player
-
+import os
 def main():
     parser = argparse.ArgumentParser(
         description="Play a media URL with additional options.")
@@ -26,23 +26,28 @@ def main():
     print("etc is ", etc)
     #
     if Path(url).exists():
-
-        scheme = Path(url).suffix.lstrip('.')
+        suffix = Path(url).suffix.lstrip('.')
+        prefix = "file"
     else:
         parsed_url = urlparse(url)
-        scheme = parsed_url.scheme
+        suffix = os.path.splitext(parsed_url.path)[1].lstrip(".")
+        prefix = parsed_url.scheme
 
-    if scheme == "ws" or scheme == "wss":
+    print("prefix is ", prefix)
+    print("suffix is ", suffix)
+
+    if ( prefix == "ws" or prefix == "wss" ) and (not suffix == "rtp"):
         ws_player(url, etc)
-    elif scheme.startswith("gb28181"):
+    elif prefix.startswith("gb28181"):
         gb28181_player(url, etc)
     elif "--vkek" in etc:
         gb35114_player(url, etc)
-    elif scheme == "pcap":
+    elif prefix == "file" and suffix == "pcap":
         pcap_player(url, etc)
-    elif scheme == "rtp":
+    elif suffix == "rtp":
         rtp_player(url, etc)
     else:
+
         other_player(url, etc)
 
 
