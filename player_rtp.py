@@ -276,6 +276,8 @@ def play_rtp_file(url, etc_list):
     if is_mp2p:
         socket_url = [mp2p_file]
     else:
+        # wait ffmpeg ready
+        time.sleep(2)
         socket_url = VIDEO_UDP
 
     try:
