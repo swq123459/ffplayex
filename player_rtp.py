@@ -225,43 +225,41 @@ def push_stream(input, an, socket_url, is_mp2p, stop_event):
             timestamp = struct.unpack(">I", packet[4:8])[0]
 
 
+
             if pt in VIDEO_PT:
-                # First packet: initialize
-                sleep_time = 0
                 if prev_video_ts is None:
                     prev_video_ts = timestamp
                     prev_video_time = time.time()
-                else:
-                    # If timestamp changed, it's a new frame
-                    if timestamp != prev_video_ts:
-                        delta_ticks = (timestamp - prev_video_ts) & 0xFFFFFFFF
-                        delta_seconds = delta_ticks / CLOCK_RATE
 
-                        # Sleep until next frame
-                        now = time.time()
-                        sleep_time = prev_video_time + delta_seconds - now
+                rtp_time = (timestamp - prev_video_ts) & 0xFFFFFFFF
+                rtp_seconds = rtp_time / CLOCK_RATE
+                send_time = prev_video_time + rtp_seconds
 
-                        if sleep_time > 0:
-                            time.sleep(sleep_time)
-                            prev_video_ts = timestamp
-                            prev_video_time = time.time()
+                sleep_time = send_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
-                # payload = packet[12:]  # strip RTP header
                 video_socket.sendto(packet, socket_url)
+                prev_video_ts = timestamp
+                prev_video_time = send_time
             elif pt in AUDIO_PT:
                 if an is True:
                     continue
                 if prev_audio_ts is None:
                     prev_audio_ts = timestamp
                     prev_audio_time = time.time()
-                elif timestamp != prev_audio_ts:
-                    delta_seconds = ((timestamp - prev_audio_ts) & 0xFFFFFFFF) / AUDIO_CLOCK
-                    sleep_time = prev_audio_time + delta_seconds - time.time()
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                    prev_audio_ts = timestamp
-                    prev_audio_time = time.time()
+
+                rtp_time = (timestamp - prev_audio_ts) & 0xFFFFFFFF
+                rtp_seconds = rtp_time / AUDIO_CLOCK
+                send_time = prev_audio_time + rtp_seconds
+
+                sleep_time = send_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
                 audio_socket.sendto(packet, audio_udp)
+                prev_audio_ts = timestamp
+                prev_audio_time = send_time
             elif pt in COM_PT:
                 payload = packet[12:]
                 if f_mp2p is not None:
@@ -316,7 +314,7 @@ def play_rtp_file(url, etc_list, window_title):
         socket_url = [mp2p_file]
     else:
         # wait ffmpeg ready
-        time.sleep(1.5)
+        time.sleep(3)
         socket_url = VIDEO_UDP
 
     try:
