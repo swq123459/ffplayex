@@ -6,12 +6,10 @@ import struct
 import time
 import argparse
 import subprocess
-import time
 import os
 import tempfile
 import uuid
 import threading
-from pathlib import Path
 import http.client
 from urllib.parse import urlparse
 import io
@@ -275,12 +273,8 @@ def modify_sdp(input_file, first_port, ip, an):
 
 
 
-def start_listen_stream(input, etc, is_mp2p, window_title, stop_event):
-    if is_mp2p:
-        # if is mp2p, just play file
-        command = f"ffplay -hide_banner -follow 1 -window_title {window_title} -i {input}"
-    else:
-        command = f'ffplay -hide_banner {etc} -window_title {window_title} -protocol_whitelist file,udp,rtp {input}'
+def start_listen_stream(input, etc, window_title, stop_event):
+    command = f'ffplay -hide_banner {etc} -window_title {window_title} -protocol_whitelist file,udp,rtp {input}'
     print("ffmpeg command", command)
     proc = subprocess.Popen(
         command, stdout=subprocess.PIPE, shell=True)
@@ -295,24 +289,16 @@ def start_listen_stream(input, etc, is_mp2p, window_title, stop_event):
         print("Rtp passive player stop success")
         stop_event.set()
 
-def push_stream(stream_buffer, an, socket_url, is_mp2p, stop_event):
+def push_stream(stream_buffer, an, socket_url, stop_event):
     prev_video_ts = None
     prev_video_time = None
 
     prev_audio_ts = None
     prev_audio_time = None
 
-    audio_udp = None
-
-
-    f_mp2p = None
-    if is_mp2p:
-        socket_url = socket_url[0]
-        f_mp2p = open(socket_url, "wb")
-    else:
-        audio_udp = (socket_url[0], socket_url[1]+2)
-        video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    audio_udp = (socket_url[0], socket_url[1]+2)
+    video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while True:
         if stop_event.is_set():
             break
@@ -370,10 +356,8 @@ def push_stream(stream_buffer, an, socket_url, is_mp2p, stop_event):
             prev_audio_ts = timestamp
             prev_audio_time = send_time
         elif pt in COM_PT:
-            payload = packet[12:]
-            if f_mp2p is not None:
-                print(f"write bytes: {len(payload)}")
-                f_mp2p.write(payload)
+            # COM_PT packets are skipped
+            pass
         else:
             print(f"Skip rtp packet, pt:{pt}")
 
@@ -382,129 +366,50 @@ def push_stream(stream_buffer, an, socket_url, is_mp2p, stop_event):
 
 
 
-def stream_file_to_buffer(input_file, stream_buffer):
-    with open(input_file, "rb") as f:
-        while True:
-            chunk = f.read(4096)
-            if not chunk:
-                break
-            stream_buffer.append_stream(chunk)
-    stream_buffer.close()
+def play(url, etc_list):
+    stream_buffer = RtpStreamBuffer()
+    stop_event = threading.Event()
 
+    def pull_http_stream():
+        stream_to_buffer(url=url, stream_buffer=stream_buffer)
 
+    t = threading.Thread(target=pull_http_stream, daemon=True)
+    t.start()
+    header_bytes = stream_buffer.wait_for_header(stop_event)
+    if not header_bytes:
+        raise RuntimeError("Failed to receive SDP header from stream")
 
-def play_rtp_file(url, etc_list, window_title):
-    input = url
+    sdp_part_file = make_temp_name("sdp")
+    with open(sdp_part_file, "wb") as f:
+        f.write(header_bytes)
+
     etc = " ".join(etc_list)
     an = "-an" in etc
-    static_sdp_file = f"{input}.sdp"
-    if not Path(static_sdp_file).exists():
-        raise f"File {static_sdp_file} no exit"
-    print(f"Found stati sdp file in {static_sdp_file}")
-
-
     dynamic_sdp_file = make_temp_name("sdp")
-    mp2p_file = make_temp_name("ps")
-    dynamic_sdp_lines = modify_sdp(input_file=static_sdp_file, ip=VIDEO_UDP[0], first_port=VIDEO_UDP[1], an=an)
+    dynamic_sdp_lines = modify_sdp(input_file=sdp_part_file, ip=VIDEO_UDP[0], first_port=VIDEO_UDP[1], an=an)
     dynamic_sdp_content = "".join(dynamic_sdp_lines)
     print(dynamic_sdp_content)
 
     with open(dynamic_sdp_file, "w") as f:
         f.writelines(dynamic_sdp_lines)
-    is_mp2p = "MP2P" in dynamic_sdp_content
-
 
     print(f"dynamic_sdp_file > {dynamic_sdp_file}")
 
-    stop_event = threading.Event()
-
-    if is_mp2p is True:
-        dynamic_sdp_file = mp2p_file
-
+    socket_url = VIDEO_UDP
 
     def listen_stream():
-
-        start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=window_title, is_mp2p=is_mp2p, stop_event=stop_event)
+        start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=url, stop_event=stop_event)
 
     pull_thread = threading.Thread(target=listen_stream, daemon=True)
     pull_thread.start()
 
-
-    if is_mp2p:
-        socket_url = [mp2p_file]
-    else:
-        # wait ffmpeg ready
-        time.sleep(3)
-        socket_url = VIDEO_UDP
-
-    stream_buffer = RtpStreamBuffer()
-    stream_buffer.set_header(dynamic_sdp_content.encode())
-    fill_thread = threading.Thread(target=stream_file_to_buffer, args=(input, stream_buffer), daemon=True)
-    fill_thread.start()
+    time.sleep(3)
 
     try:
-        push_stream(stream_buffer=stream_buffer, an=an, socket_url=socket_url, is_mp2p=is_mp2p, stop_event=stop_event)
-
+        push_stream(stream_buffer=stream_buffer, an=an, socket_url=socket_url, stop_event=stop_event)
     finally:
         stop_event.set()
         print("Rtp pusher stop success")
-
-
-
-def play(url, etc_list):
-    if not os.path.exists(url):
-        stream_buffer = RtpStreamBuffer()
-        stop_event = threading.Event()
-
-        def pull_http_stream():
-            stream_to_buffer(url=url, stream_buffer=stream_buffer)
-
-        t = threading.Thread(target=pull_http_stream, daemon=True)
-        t.start()
-        header_bytes = stream_buffer.wait_for_header(stop_event)
-        if not header_bytes:
-            raise RuntimeError("Failed to receive SDP header from stream")
-
-        sdp_part_file = make_temp_name("sdp")
-        with open(sdp_part_file, "wb") as f:
-            f.write(header_bytes)
-
-        etc = " ".join(etc_list)
-        an = "-an" in etc
-        dynamic_sdp_file = make_temp_name("sdp")
-        mp2p_file = make_temp_name("ps")
-        dynamic_sdp_lines = modify_sdp(input_file=sdp_part_file, ip=VIDEO_UDP[0], first_port=VIDEO_UDP[1], an=an)
-        dynamic_sdp_content = "".join(dynamic_sdp_lines)
-        print(dynamic_sdp_content)
-
-        with open(dynamic_sdp_file, "w") as f:
-            f.writelines(dynamic_sdp_lines)
-        is_mp2p = "MP2P" in dynamic_sdp_content
-
-        print(f"dynamic_sdp_file > {dynamic_sdp_file}")
-
-        if is_mp2p:
-            dynamic_sdp_file = mp2p_file
-            socket_url = [mp2p_file]
-        else:
-            socket_url = VIDEO_UDP
-
-        def listen_stream():
-            start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=url, is_mp2p=is_mp2p, stop_event=stop_event)
-
-        pull_thread = threading.Thread(target=listen_stream, daemon=True)
-        pull_thread.start()
-
-        if not is_mp2p:
-            time.sleep(3)
-
-        try:
-            push_stream(stream_buffer=stream_buffer, an=an, socket_url=socket_url, is_mp2p=is_mp2p, stop_event=stop_event)
-        finally:
-            stop_event.set()
-            print("Rtp pusher stop success")
-    else:
-        play_rtp_file(url=url, etc_list=etc_list, window_title=url)
 
 
 if __name__ == "__main__":
@@ -515,8 +420,7 @@ if __name__ == "__main__":
 
     parser.add_argument("etc", nargs=argparse.REMAINDER,
                         help="Other arguments for play options.")
-    # python .\ffplayex.py  "\\wsl.localhost\Ubuntu\home\swq\mux\build\guojian.rtp" -an
-    # python .\ffplayex.py  "\\wsl.localhost\Ubuntu\home\swq\mux\build\duration0mp2p.rtp"
+
 
     args = parser.parse_args()
     url = args.url
