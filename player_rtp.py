@@ -25,7 +25,13 @@ AUDIO_CLOCK = 48000
 TCP_LOCAL_PORT = 3888
 STREAM_WAIT_INTERVAL = 0.1
 
-VIDEO_UDP = ("127.0.0.1", 1238)
+VIDEO_UDP_IP = "127.0.0.1"
+
+
+def get_free_udp_addr(host):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind((host, 0))
+        return s.getsockname()
 
 
 class RtpStreamBuffer:
@@ -229,7 +235,8 @@ def stream_to_buffer(url, stream_buffer, buffer_size=1024):
 def make_temp_name(suffix):
     return os.path.join(tempfile.gettempdir(), str(uuid.uuid1()) + f".{suffix}")
 
-def modify_sdp(input_file, first_port, ip, an):
+def modify_sdp(input_file, addr, an):
+    ip, first_port = addr
     with open(input_file, "r") as f:
         lines = f.readlines()
 
@@ -385,8 +392,13 @@ def play(url, etc_list):
 
     etc = " ".join(etc_list)
     an = "-an" in etc
+
+    socket_url = get_free_udp_addr(VIDEO_UDP_IP)
+    video_port = socket_url[1]
+    print(f"Using UDP port: {video_port}")
+
     dynamic_sdp_file = make_temp_name("sdp")
-    dynamic_sdp_lines = modify_sdp(input_file=sdp_part_file, ip=VIDEO_UDP[0], first_port=VIDEO_UDP[1], an=an)
+    dynamic_sdp_lines = modify_sdp(input_file=sdp_part_file, addr=socket_url, an=an)
     dynamic_sdp_content = "".join(dynamic_sdp_lines)
     print(dynamic_sdp_content)
 
@@ -394,8 +406,6 @@ def play(url, etc_list):
         f.writelines(dynamic_sdp_lines)
 
     print(f"dynamic_sdp_file > {dynamic_sdp_file}")
-
-    socket_url = VIDEO_UDP
 
     def listen_stream():
         start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=url, stop_event=stop_event)
