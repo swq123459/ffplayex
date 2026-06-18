@@ -14,11 +14,7 @@ import websockets
 import ssl
 import asyncio
 
-VIDEO_PT = [98, 100]
 COM_PT = [96]
-AUDIO_PT = [8, 101]  # we'll ignore audio
-CLOCK_RATE = 90000
-AUDIO_CLOCK = 48000
 TCP_LOCAL_PORT = 3888
 STREAM_WAIT_INTERVAL = 0.1
 
@@ -229,7 +225,42 @@ def stream_to_buffer(url, stream_buffer, buffer_size=1024):
     else:
         raise ValueError(f"Unsupported stream url: {url}")
 
-def modify_sdp(sdp_content, addr, an):
+def parse_sdp_media_info(sdp_content, base_port):
+    """
+    Parse SDP content and return:
+      - pt_port_map: dict PT -> UDP port
+      - pt_clock_map: dict PT -> clock rate (Hz)
+    """
+    pt_port_map = {}
+    pt_clock_map = {}
+    stream_index = 0
+
+    for line in sdp_content.splitlines():
+        line_strip = line.strip()
+        if not line_strip:
+            continue
+        if line_strip.startswith("m="):
+            parts = line_strip.split()
+            port = base_port + stream_index * 2
+            for pt_str in parts[3:]:
+                try:
+                    pt = int(pt_str)
+                    pt_port_map[pt] = port
+                except ValueError:
+                    pass
+            stream_index += 1
+        elif line_strip.startswith("a=rtpmap:"):
+            rest = line_strip[len("a=rtpmap:"):].strip()
+            pt_str, encoding = rest.split(None, 1)
+            pt = int(pt_str)
+            if "/" in encoding:
+                clock_str = encoding.split("/")[1]
+                pt_clock_map[pt] = int(clock_str)
+
+    return pt_port_map, pt_clock_map
+
+
+def modify_sdp(sdp_content, addr):
     ip, first_port = addr
     lines = sdp_content.splitlines(keepends=True)
 
@@ -254,9 +285,6 @@ def modify_sdp(sdp_content, addr, an):
             port = first_port + stream_index * 2
 
             parts = line_strip.split()
-            media_type = parts[0].split("=")[1]
-            if an is True and media_type == "audio":
-                break
             parts[1] = str(port)
             stream_block.append(" ".join(parts) + "\n")
             stream_index += 1
@@ -270,7 +298,6 @@ def modify_sdp(sdp_content, addr, an):
         stream_block.append(f"c=IN IP4 {ip}\n")
         new_lines.extend(stream_block)
     return "".join(new_lines)
-
 
 
 def start_listen_stream(sdp_content, etc, window_title, stop_event):
@@ -297,16 +324,15 @@ def start_listen_stream(sdp_content, etc, window_title, stop_event):
         print("Rtp passive player stop success")
         stop_event.set()
 
-def push_stream(stream_buffer, an, socket_url, stop_event):
-    prev_video_ts = None
-    prev_video_time = None
+def push_stream(stream_buffer, socket_url, stop_event, pt_port_map, pt_clock_map):
+    """
+    Push RTP packets from buffer to UDP sockets.
+    pt_port_map: PT -> destination port
+    pt_clock_map: PT -> clock rate (Hz)
+    """
+    prev_ts = {}      # PT -> (last_timestamp, last_send_time)
+    sockets = {}      # port -> udp_socket
 
-    prev_audio_ts = None
-    prev_audio_time = None
-
-    audio_udp = (socket_url[0], socket_url[1]+2)
-    video_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    audio_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     while True:
         if stop_event.is_set():
             break
@@ -329,49 +355,39 @@ def push_stream(stream_buffer, an, socket_url, stop_event):
         pt = packet[1] & 0x7F
         timestamp = struct.unpack(">I", packet[4:8])[0]
 
-        if pt in VIDEO_PT:
-            if prev_video_ts is None:
-                prev_video_ts = timestamp
-                prev_video_time = time.time()
+        # Look up destination port for this PT
+        dest_port = pt_port_map.get(pt)
+        if dest_port is None:
+            if pt in COM_PT:
+                continue  # skip COM packets silently
+            print(f"Skip rtp packet, pt:{pt} (no port mapping)")
+            continue
 
-            rtp_time = (timestamp - prev_video_ts) & 0xFFFFFFFF
-            rtp_seconds = rtp_time / CLOCK_RATE
-            send_time = prev_video_time + rtp_seconds
+        # Per-PT clock rate from SDP's a=rtpmap:
+        clock_rate = pt_clock_map.get(pt)
+        if clock_rate is None:
+            print(f"Skip rtp packet, pt:{pt} (no clock rate in SDP)")
+            continue
 
-            sleep_time = send_time - time.time()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+        if pt not in prev_ts:
+            prev_ts[pt] = (timestamp, time.time())
 
-            video_socket.sendto(packet, socket_url)
-            prev_video_ts = timestamp
-            prev_video_time = send_time
-        elif pt in AUDIO_PT:
-            if an is True:
-                continue
-            if prev_audio_ts is None:
-                prev_audio_ts = timestamp
-                prev_audio_time = time.time()
+        last_ts, last_time = prev_ts[pt]
+        rtp_delta = (timestamp - last_ts) & 0xFFFFFFFF
+        rtp_seconds = rtp_delta / clock_rate
+        send_time = last_time + rtp_seconds
 
-            rtp_time = (timestamp - prev_audio_ts) & 0xFFFFFFFF
-            rtp_seconds = rtp_time / AUDIO_CLOCK
-            send_time = prev_audio_time + rtp_seconds
+        sleep_time = send_time - time.time()
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
-            sleep_time = send_time - time.time()
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+        # Reuse socket per destination port
+        if dest_port not in sockets:
+            sockets[dest_port] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-            audio_socket.sendto(packet, audio_udp)
-            prev_audio_ts = timestamp
-            prev_audio_time = send_time
-        elif pt in COM_PT:
-            # COM_PT packets are skipped
-            pass
-        else:
-            print(f"Skip rtp packet, pt:{pt}")
-
-            # Send the packet to UDP server
-            # udp_socket.sendto(packet, (UDP_IP, UDP_PORT))
-
+        addr = (socket_url[0], dest_port)
+        sockets[dest_port].sendto(packet, addr)
+        prev_ts[pt] = (timestamp, send_time)
 
 
 def play(url, etc_list):
@@ -388,14 +404,18 @@ def play(url, etc_list):
         raise RuntimeError("Failed to receive SDP header from stream")
 
     etc = " ".join(etc_list)
-    an = "-an" in etc
 
     socket_url = get_free_udp_addr(VIDEO_UDP_IP)
-    video_port = socket_url[1]
-    print(f"Using UDP port: {video_port}")
+    base_port = socket_url[1]
+    print(f"Using UDP base port: {base_port}")
 
     sdp_str = header_bytes.decode("utf-8", errors="replace")
-    dynamic_sdp_content = modify_sdp(sdp_content=sdp_str, addr=socket_url, an=an)
+
+    # Parse SDP to get PT→port and PT→clock mappings
+    pt_port_map, pt_clock_map = parse_sdp_media_info(sdp_str, base_port)
+
+    # Rewrite SDP with correct ports
+    dynamic_sdp_content = modify_sdp(sdp_content=sdp_str, addr=socket_url)
     print(dynamic_sdp_content)
 
     def listen_stream():
@@ -407,7 +427,8 @@ def play(url, etc_list):
     time.sleep(3)
 
     try:
-        push_stream(stream_buffer=stream_buffer, an=an, socket_url=socket_url, stop_event=stop_event)
+        push_stream(stream_buffer=stream_buffer, socket_url=socket_url, stop_event=stop_event,
+                    pt_port_map=pt_port_map, pt_clock_map=pt_clock_map)
     finally:
         stop_event.set()
         print("Rtp pusher stop success")
