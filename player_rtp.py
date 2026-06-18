@@ -7,12 +7,9 @@ import time
 import argparse
 import subprocess
 import os
-import tempfile
-import uuid
 import threading
 import http.client
 from urllib.parse import urlparse
-import io
 import websockets
 import ssl
 import asyncio
@@ -232,13 +229,9 @@ def stream_to_buffer(url, stream_buffer, buffer_size=1024):
     else:
         raise ValueError(f"Unsupported stream url: {url}")
 
-def make_temp_name(suffix):
-    return os.path.join(tempfile.gettempdir(), str(uuid.uuid1()) + f".{suffix}")
-
-def modify_sdp(input_file, addr, an):
+def modify_sdp(sdp_content, addr, an):
     ip, first_port = addr
-    with open(input_file, "r") as f:
-        lines = f.readlines()
+    lines = sdp_content.splitlines(keepends=True)
 
     new_lines = []
     stream_block = []
@@ -276,15 +269,22 @@ def modify_sdp(input_file, addr, an):
     if in_stream and stream_block:
         stream_block.append(f"c=IN IP4 {ip}\n")
         new_lines.extend(stream_block)
-    return new_lines
+    return "".join(new_lines)
 
 
 
-def start_listen_stream(input, etc, window_title, stop_event):
-    command = f'ffplay -hide_banner {etc} -window_title {window_title} -protocol_whitelist file,udp,rtp {input}'
+def start_listen_stream(sdp_content, etc, window_title, stop_event):
+    r, w = os.pipe()
+    try:
+        sdp_bytes = sdp_content.encode()
+        os.write(w, sdp_bytes)
+    finally:
+        os.close(w)
+
+    command = f'ffplay -hide_banner {etc} -window_title "{window_title}" -protocol_whitelist file,udp,rtp,fd -i -'
     print("ffmpeg command", command)
     proc = subprocess.Popen(
-        command, stdout=subprocess.PIPE, shell=True)
+        command, stdin=r, stdout=subprocess.PIPE, shell=True)
     try:
         while proc.poll() is None:
             if stop_event.is_set():
@@ -292,6 +292,7 @@ def start_listen_stream(input, etc, window_title, stop_event):
                 break
             time.sleep(0.1)
     finally:
+        os.close(r)
         proc.wait()
         print("Rtp passive player stop success")
         stop_event.set()
@@ -386,10 +387,6 @@ def play(url, etc_list):
     if not header_bytes:
         raise RuntimeError("Failed to receive SDP header from stream")
 
-    sdp_part_file = make_temp_name("sdp")
-    with open(sdp_part_file, "wb") as f:
-        f.write(header_bytes)
-
     etc = " ".join(etc_list)
     an = "-an" in etc
 
@@ -397,18 +394,12 @@ def play(url, etc_list):
     video_port = socket_url[1]
     print(f"Using UDP port: {video_port}")
 
-    dynamic_sdp_file = make_temp_name("sdp")
-    dynamic_sdp_lines = modify_sdp(input_file=sdp_part_file, addr=socket_url, an=an)
-    dynamic_sdp_content = "".join(dynamic_sdp_lines)
+    sdp_str = header_bytes.decode("utf-8", errors="replace")
+    dynamic_sdp_content = modify_sdp(sdp_content=sdp_str, addr=socket_url, an=an)
     print(dynamic_sdp_content)
 
-    with open(dynamic_sdp_file, "w") as f:
-        f.writelines(dynamic_sdp_lines)
-
-    print(f"dynamic_sdp_file > {dynamic_sdp_file}")
-
     def listen_stream():
-        start_listen_stream(input=dynamic_sdp_file, etc=etc, window_title=url, stop_event=stop_event)
+        start_listen_stream(sdp_content=dynamic_sdp_content, etc=etc, window_title=url, stop_event=stop_event)
 
     pull_thread = threading.Thread(target=listen_stream, daemon=True)
     pull_thread.start()
