@@ -4,14 +4,45 @@ import argparse
 import os
 from pathlib import Path
 from .extract_payload_of_pcap import extract_raw_data
-from .extract_payload_of_tcpraw import extract_payload
+from .extract_payload_of_tcpraw import parse_payload
+
+
+def extract_payload_streams(input_file):
+    """Extract media payloads from a pcap.
+
+    Returns a list of (flow, payload_bytes). Each flow is one direction of one
+    TCP connection and yields its own MPEG-TS / MPEG-PS payload stream, so
+    multi-stream captures produce multiple entries.
+    """
+    flows = extract_raw_data(input_file)
+    streams = []
+    for flow, tcp_payload in flows.items():
+        payload = parse_payload(tcp_payload)
+        if payload:
+            streams.append((flow, payload))
+    return streams
 
 
 def extract_payload_from_file(input_file, outfile_name):
-    tcp_payload = extract_raw_data(input_file)
+    """Extract and write every flow's payload to outfile_name.
+
+    When multiple flows are found, writes each flow to a separate file:
+    <stem>.<index>.<ext> (e.g. out_0.data, out_1.data). Returns the list of
+    output files written.
+    """
+    streams = extract_payload_streams(input_file)
     print("tcp payload extract")
-    extract_payload(outfile_name=outfile_name,
-                    tcp_payload=tcp_payload)
+    written = []
+    if len(streams) <= 1:
+        paths = [outfile_name]
+    else:
+        root, ext = os.path.splitext(outfile_name)
+        paths = ['%s.%d%s' % (root, i, ext) for i in range(len(streams))]
+    for (flow, payload), path in zip(streams, paths):
+        with open(path, 'wb') as f:
+            f.write(payload)
+        written.append(path)
+    return written
 
 
 if __name__ == "__main__":
@@ -37,4 +68,5 @@ if __name__ == "__main__":
         pass
     print("Write output to", output_file)
 
-    extract_payload_from_file(input_file, output_file)
+    written = extract_payload_from_file(input_file, output_file)
+    print("wrote:", written)

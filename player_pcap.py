@@ -1,52 +1,62 @@
-
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-
 import argparse
 import subprocess
-import time
 import os
 import tempfile
 import uuid
 import threading
-import asyncio
 
-from pcap import extract_payload_from_file
+from pcap import extract_payload_streams
 
 
 def make_temp_name():
     return os.path.join(tempfile.gettempdir(), str(uuid.uuid1()) + ".pipe")
 
 
-async def save_binary_data(uri, output_filename, stop_event):
-    extract_payload_from_file(uri, output_filename)
+def _ip_str(raw):
+    if isinstance(raw, bytes):
+        return '.'.join(str(b) for b in raw)
+    return str(raw)
+
+
+def _window_title_for_flow(url, flow):
+    src_ip, src_port, dst_ip, dst_port = flow
+    return f"{url} {_ip_str(src_ip)}:{src_port}->{_ip_str(dst_ip)}:{dst_port}"
+
+
+def _play_one(url, payload, flow, etc):
+    encry_file = make_temp_name()
+    with open(encry_file, 'wb') as f:
+        f.write(payload)
+    title = _window_title_for_flow(url, flow)
+    subprocess.run(
+        f"ffplay -hide_banner -window_title \"{title}\" {etc} -i {encry_file}",
+        shell=True)
+    try:
+        os.unlink(encry_file)
+    except OSError:
+        pass
 
 
 def play(url, etc):
     etc = " ".join(etc)
+    streams = extract_payload_streams(url)
+    if not streams:
+        print("no media payload found in", url)
+        return
 
-    encry_file = make_temp_name()
+    print(f"found {len(streams)} stream(s)")
+    windows = []
+    for flow, payload in streams:
+        t = threading.Thread(
+            target=_play_one, args=(url, payload, flow, etc), daemon=True)
+        t.start()
+        windows.append(t)
 
-    print(f"encry > {encry_file}")
-
-    stop_event = threading.Event()
-
-    def pull_stream():
-        asyncio.run(save_binary_data(url, encry_file, stop_event))
-
-    pull_thread = threading.Thread(target=pull_stream, daemon=True)
-    pull_thread.start()
-    pull_thread.join()
-
-    # Player
-    while not os.path.exists(encry_file):
-        time.sleep(0.1)
-
-    subprocess.run(
-        f"ffplay -hide_banner -window_title {url}  {etc} -i {encry_file}")
-
-    stop_event.set()
+    for t in windows:
+        t.join()
 
 
 if __name__ == "__main__":
